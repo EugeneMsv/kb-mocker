@@ -9,10 +9,11 @@ class QuestionRequest(BaseModel):
     question: str
 
 class QuestionResponse(BaseModel):
+    reasoning: str
     answer: str
 
 
-@router.post("/ask",response_model=QuestionResponse)
+@router.post("/ask", response_model=QuestionResponse)
 async def ask(request: QuestionRequest) -> QuestionResponse:
-    answer = await run_agent(request.question)
-    return QuestionResponse(answer=answer)
+    result = await run_agent(request.question)
+    return QuestionResponse(reasoning=result.reasoning, answer=result.answer)

@@ -1,27 +1,36 @@
 import logging
-from email.policy import default
-from pyexpat.errors import messages
 
 from langchain_core.messages import HumanMessage, ToolMessage
-from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
-from langgraph.prebuilt import tools_condition
 from pydantic import BaseModel, Field
 
 from src.kb_mocker.config import settings
 from src.kb_mocker.tools.knowledge import list_knowledge_files, load_knowledge
 
-tools =[list_knowledge_files, load_knowledge]
+tools = [list_knowledge_files, load_knowledge]
 
-TOOL_MAP = {tool.name : tool for tool in tools}
+TOOL_MAP = {tool.name: tool for tool in tools}
 
 logger = logging.getLogger(__name__)
 
-system_prompt = ("You are a helpful assistant with access to a local knowledge base of markdown files. Use the "
-                 "available tools to look up relevant information before answering.")
+system_prompt = (
+    "You are a helpful assistant with access to a local knowledge base of markdown files. "
+    "Before answering, think step by step:\n"
+    "  (1) What exactly is the question asking?\n"
+    "  (2) Which knowledge files are likely relevant? Use list_knowledge_files first.\n"
+    "  (3) What does the loaded content say about the topic?\n"
+    "  (4) Is the answer complete and accurate based on what you loaded?\n"
+    "Always use the available tools to look up relevant information before answering. "
+    "Include your step-by-step reasoning in your response before giving the final answer."
+)
+
 
 class FinalAnswer(BaseModel):
+    reasoning: str = Field(
+        description="Step-by-step reasoning the agent used: what was asked, "
+                    "which files were consulted, what they contained, and why the answer is correct"
+    )
     answer: str = Field(description="The complete, concise answer to the user's question")
 
 def _build_llm() -> ChatOpenAI:
@@ -32,7 +41,7 @@ def _build_llm() -> ChatOpenAI:
     )
 
 
-async def run_agent(question: str) -> str:
+async def run_agent(question: str) -> FinalAnswer:
     llm_with_tools = _build_llm().bind_tools(tools)
 
     messages = [
@@ -72,16 +81,18 @@ async def run_agent(question: str) -> str:
             block["text"] for block in raw_content if block.get("type") == "text"
         )
 
-    return await format_response(raw_content)
+    return await extract_structured_answer(raw_content)
 
 
-async def format_response(raw_content:str ) -> str:
-    formatting_prompt = ChatPromptTemplate.from_messages([
-        ("system", "Return the following answer in the requested structured format. Do not change its meaning."),
-        ("human", "{raw_answer}"),
+async def extract_structured_answer(raw_content: str) -> FinalAnswer:
+    extraction_prompt = ChatPromptTemplate.from_messages([
+        ("system",
+         "Extract the reasoning and the final answer from the agent response below. "
+         "Do not add, invent, or change any information — only extract what is already there."),
+        ("human", "{raw_content}"),
     ])
-
-    formatting_chain = formatting_prompt | _build_llm().with_structured_output(FinalAnswer)
-    formatted: FinalAnswer = await formatting_chain.ainvoke({"raw_answer": raw_content})
-    logger.info("Formatted response: %s", formatted.answer)
-    return formatted.answer
+    chain = extraction_prompt | _build_llm().with_structured_output(FinalAnswer)
+    result: FinalAnswer = await chain.ainvoke({"raw_content": raw_content})
+    logger.info("Reasoning: %s", result.reasoning)
+    logger.info("Answer: %s", result.answer)
+    return result
